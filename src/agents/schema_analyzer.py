@@ -1,0 +1,1 @@
+"""Schema analyzer agent scaffold."""

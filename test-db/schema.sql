@@ -1,0 +1,1 @@
+-- Placeholder schema for test database setup.

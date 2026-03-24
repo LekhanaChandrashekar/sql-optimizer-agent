@@ -1,0 +1,1 @@
+-- Placeholder inefficient queries for testing.
