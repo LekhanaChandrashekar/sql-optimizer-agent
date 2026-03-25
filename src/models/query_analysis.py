@@ -1,7 +1,8 @@
 """Query analysis model scaffold."""
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 from enum import Enum
+from typing import Any, Dict
 
 class IssueType(str, Enum):
     FULL_SCAN = "FULL_SCAN"
@@ -13,7 +14,7 @@ class IssueType(str, Enum):
 class QueryInput(BaseModel):
     query: str
     source_file: Optional[str] = None
-    metadata: Optional[dict] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 class ExecutionNode(BaseModel):
     node_type: str
@@ -32,8 +33,8 @@ class QueryIssue(BaseModel):
     issue_type: IssueType
     severity: str
     description: str
-    tables: List[str] = []
-    columns: List[str] = []
+    tables: List[str] = Field(default_factory=list)
+    columns: List[str] = Field(default_factory=list)
 
 class OptimizationSuggestion(BaseModel):
     original_query: str
