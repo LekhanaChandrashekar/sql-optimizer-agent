@@ -1,0 +1,1 @@
+"""GORM parser tool scaffold."""

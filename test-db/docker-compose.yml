@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: sql-optimizer-agent-db
+
+    env_file:
+      - .env
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: sql_optimizer
+
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./seed_data.sql:/docker-entrypoint-initdb.d/02-seed-data.sql:ro
