@@ -104,11 +104,14 @@ UPDATE orders SET status = 'pending' WHERE status = 'delivered';
 
 -- Category 7: Audit Logging Issues
 
+-- NOTE: The `audit_logs` table is not defined in schema.sql for the seeded test DB.
+-- These example queries are kept for reference but commented out to avoid runtime errors.
+
 -- 24. Query on audit table without index (Seq Scan!)
-SELECT * FROM audit_logs WHERE user_id = 500;
+-- SELECT * FROM audit_logs WHERE user_id = 500;
 
 -- 25. Fetch ALL audit logs (missing pagination!)
-SELECT * FROM audit_logs ORDER BY created_at DESC;
+-- SELECT * FROM audit_logs ORDER BY created_at DESC;
 
 -- Category 8: Advanced Issues
 
