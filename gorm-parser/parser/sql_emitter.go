@@ -12,7 +12,7 @@ func EmitJSON(chains []GORMChain) (string, error) {
 	}
 
 	jsonBytes, err := json.MarshalIndent(output, "", "  ")
-	if err != ni
+	if err != nil {
 		return "", err
 	}
 
