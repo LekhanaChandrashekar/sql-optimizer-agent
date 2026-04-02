@@ -1,20 +1,36 @@
-[project]
-name = "sql-optimizer-agent"
-version = "0.1.0"
-description = "Scaffold for a SQL optimizer agent"
-requires-python = ">=3.11"
-dependencies = [
-    "langchain",
-    "langgraph",
-    "pydantic",
-    "psycopg[binary]",
-    "sqlglot",
-    "typer",
-]
-
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
- 
+
+[project]
+name = "sql-optimizer-agent"
+version = "0.1.0"
+description = "AI SQL Optimization Assistant"
+requires-python = ">=3.11"
+
+dependencies = [
+    "langchain",
+    "langchain-anthropic",
+    "langgraph",
+    "pydantic",
+    "psycopg2-binary",   # ✅ use only one driver
+    "sqlglot",
+    "typer",
+    "rich",
+    "python-dotenv"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio"
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+markers = [
+    "integration: marks tests that require database"
+]
