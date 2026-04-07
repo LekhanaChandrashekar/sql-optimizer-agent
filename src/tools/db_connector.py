@@ -1,343 +1,273 @@
 import psycopg2
 import os
-from contextlib import contextmanager
-from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from langchain_core.tools import tool
-from src.models.query_analysis import ExecutionPlan, ExecutionNode
-
+ 
 load_dotenv()
-class DatabaseError(Exception):
-    pass
-def validate_query(query: str):
-    if not query or not query.strip():
-        raise ValueError("Query cannot be empty")
-
-    q = query.strip().lower()
-
-    forbidden = ["insert", "update", "delete", "drop", "alter", "truncate"]
-
-    if any(q.startswith(cmd) for cmd in forbidden):
-        raise ValueError("Only SELECT queries allowed")
-
-    if ";" in query.strip()[:-1]:
-        raise ValueError("Multiple statements not allowed")
-@contextmanager
+ 
 def get_connection():
-    conn = None
-    try:
-        conn = psycopg2.connect(
-            host=os.getenv("POSTGRES_HOST"),
-            port=os.getenv("POSTGRES_PORT"),
-            dbname=os.getenv("POSTGRES_DB"),
-            user=os.getenv("POSTGRES_USER"),
-            password=os.getenv("POSTGRES_PASSWORD"),
-            cursor_factory=RealDictCursor,
-        )
-        yield conn
-    except Exception as e:
-        raise DatabaseError(f"DB connection failed: {e}")
-    finally:
-        if conn:
-            conn.close()
-
-
-@tool
-def run_explain(query: str) -> dict:
-    """Run EXPLAIN ANALYZE on a SQL query and return the execution plan as JSON"""
-    validate_query(query)
-
-    explain_analyze = f"""
-    EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
-    {query}
-    """
-
-    explain_only = f"""
-    EXPLAIN (FORMAT JSON)
-    {query}
-    """
-
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SET statement_timeout = 5000;")
-
-                try:
-                    # Try ANALYZE first
-                    cur.execute(explain_analyze)
-                    result = cur.fetchone()
-
-                except Exception:
-                    # FALLBACK to safe EXPLAIN
-                    conn.rollback()
-                    cur.execute(explain_only)
-                    result = cur.fetchone()
-
-                if not result:
-                    raise DatabaseError("Empty EXPLAIN result")
-
-                plan_json = result.get("QUERY PLAN")
-
-                if not plan_json:
-                    raise DatabaseError("Invalid EXPLAIN format")
-
-                return plan_json[0]
-
-    except Exception as e:
-        raise DatabaseError(f"EXPLAIN failed: {e}")
-
-
-def parse_execution_plan(plan_json: dict) -> ExecutionPlan:
-    plan_root = plan_json.get("Plan", {})
-    execution_time = plan_json.get("Execution Time", 0)
-
-    nodes = []
-
-    def traverse(node):
-        nodes.append(
-            ExecutionNode(
-                node_type=node.get("Node Type"),
-                total_cost=node.get("Total Cost", 0),
-                plan_rows=node.get("Plan Rows", 0),
-                plan_width=node.get("Plan Width", 0),
-                actual_time=node.get("Actual Total Time", 0),
-                loops=node.get("Actual Loops", 0),
-                relation_name=node.get("Relation Name"),
-            )
-        )
-        for child in node.get("Plans", []):
-            traverse(child)
-
-    traverse(plan_root)
-
-    return ExecutionPlan(
-        total_cost=plan_root.get("Total Cost", 0),
-        execution_time=execution_time,
-        nodes=nodes,
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST", "localhost"),
+        port=os.getenv("DB_PORT", "5433"),
+        database=os.getenv("DB_NAME", "testdb"),
+        user=os.getenv("DB_USER", "optimizer"),
+        password=os.getenv("DB_PASSWORD", "optimizer123")
     )
-
-
-def extract_metrics(plan: ExecutionPlan):
-    metrics = {
-        "seq_scan": 0,
-        "index_scan": 0,
-        "bitmap_scan": 0,
-        "sort": 0,
-        "hash_join": 0,
-        "nested_loop": 0,
-        "total_cost": plan.total_cost,
-        "execution_time": plan.execution_time,
-    }
-
-    for node in plan.nodes:
-       nt = node.node_type or ""
-
-      if nt == "Seq Scan":
-          metrics["seq_scan"] += 1
-      elif nt in ["Index Scan", "Index Only Scan"]:
-          metrics["index_scan"] += 1
-      elif "Bitmap" in nt:
-          metrics["bitmap_scan"] += 1
-      elif nt == "Sort":
-          metrics["sort"] += 1
-      elif "Hash Join" in nt:
-          metrics["hash_join"] += 1
-      elif "Nested Loop" in nt:
-          metrics["nested_loop"] += 1
-
-    return metrics
-
-# Schema inspection tools
-
+ 
+@tool
+def run_explain_analyze(query: str) -> str:
+    """Run EXPLAIN ANALYZE on a SQL query and return the query plan"""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(f"EXPLAIN ANALYZE {query}")
+        rows = cursor.fetchall()
+        return "\n".join([row[0] for row in rows])
+    except Exception as e:
+        return f"Error: {str(e)}"
+    finally:
+        conn.close()
+ 
 @tool
 def get_table_schema(table_name: str) -> str:
     """Get schema of a table including columns, types, indexes and constraints"""
+    conn = get_connection()
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT column_name, data_type,
-                           character_maximum_length,
-                           is_nullable, column_default
-                    FROM information_schema.columns
-                    WHERE table_name = %s
-                    ORDER BY ordinal_position
-                """, (table_name,))
-                columns = cur.fetchall()
-
-                cur.execute("""
-                    SELECT indexname, indexdef
-                    FROM pg_indexes
-                    WHERE tablename = %s
-                """, (table_name,))
-                indexes = cur.fetchall()
-
-                cur.execute("""
-                    SELECT tc.constraint_name, tc.constraint_type,
-                           kcu.column_name, ccu.table_name AS foreign_table,
-                           ccu.column_name AS foreign_column
-                    FROM information_schema.table_constraints tc
-                    JOIN information_schema.key_column_usage kcu
-                        ON tc.constraint_name = kcu.constraint_name
-                    LEFT JOIN information_schema.constraint_column_usage ccu
-                        ON tc.constraint_name = ccu.constraint_name
-                    WHERE tc.table_name = %s
-                """, (table_name,))
-                constraints = cur.fetchall()
-
-                result = f"Table: {table_name}\n\nColumns:\n"
-                for col in columns:
-                    result += f"  {col['column_name']} -> {col['data_type']}"
-                    if col["character_maximum_length"]:
-                        result += f"({col['character_maximum_length']})"
-                    result += f" | nullable: {col['is_nullable']}"
-                    if col["column_default"]:
-                        result += f" | default: {col['column_default']}"
-                    result += "\n"
-
-                result += "\nIndexes:\n"
-                if indexes:
-                    for idx in indexes:
-                        result += f"  {idx['indexname']}: {idx['indexdef']}\n"
-                else:
-                    result += "  NO INDEXES FOUND!\n"
-
-                result += "\nConstraints:\n"
-                if constraints:
-                    for con in constraints:
-                        result += f"  {con['constraint_type']}: {con['column_name']}"
-                        if con["foreign_table"]:
-                            result += f" -> {con['foreign_table']}.{con['foreign_column']}"
-                        result += "\n"
-                else:
-                    result += "  NO CONSTRAINTS FOUND!\n"
-
-                return result
-
+        cursor = conn.cursor()
+ 
+        # Get columns
+        cursor.execute("""
+            SELECT column_name, data_type,
+                   character_maximum_length,
+                   is_nullable, column_default
+            FROM information_schema.columns
+            WHERE table_name = %s
+            ORDER BY ordinal_position
+        """, (table_name,))
+        columns = cursor.fetchall()
+ 
+        # Get indexes
+        cursor.execute("""
+            SELECT indexname, indexdef
+            FROM pg_indexes
+            WHERE tablename = %s
+        """, (table_name,))
+        indexes = cursor.fetchall()
+ 
+        # Get constraints
+        cursor.execute("""
+            SELECT tc.constraint_name, tc.constraint_type,
+                   kcu.column_name, ccu.table_name AS foreign_table,
+                   ccu.column_name AS foreign_column
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_name = kcu.constraint_name
+            LEFT JOIN information_schema.constraint_column_usage ccu
+                ON tc.constraint_name = ccu.constraint_name
+            WHERE tc.table_name = %s
+        """, (table_name,))
+        constraints = cursor.fetchall()
+ 
+        # Build result
+        result = f"Table: {table_name}\n\nColumns:\n"
+        for col in columns:
+            result += f"  {col[0]} → {col[1]}"
+            if col[2]:
+                result += f"({col[2]})"
+            result += f" | nullable: {col[3]}"
+            if col[4]:
+                result += f" | default: {col[4]}"
+            result += "\n"
+ 
+        result += "\nIndexes:\n"
+        if indexes:
+            for idx in indexes:
+                result += f"  {idx[0]}: {idx[1]}\n"
+        else:
+            result += "  NO INDEXES FOUND! \n"
+ 
+        result += "\nConstraints:\n"
+        if constraints:
+            for con in constraints:
+                result += f"  {con[1]}: {con[2]}"
+                if con[3]:
+                    result += f" → {con[3]}.{con[4]}"
+                result += "\n"
+        else:
+            result += "  NO CONSTRAINTS FOUND! \n"
+ 
+        return result
     except Exception as e:
         return f"Error: {str(e)}"
-
-
+    finally:
+        conn.close()
+ 
 @tool
 def get_all_tables() -> str:
     """Get list of all tables in the database with their sizes"""
+    conn = get_connection()
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT tablename,
-                           pg_size_pretty(pg_total_relation_size(tablename::regclass))
-                               AS total_size
-                    FROM pg_tables
-                    WHERE schemaname = 'public'
-                    ORDER BY pg_total_relation_size(tablename::regclass) DESC
-                """)
-                tables = cur.fetchall()
-
-                result = "Tables in database:\n"
-                for table in tables:
-                    result += f"  {table['tablename']} -> size: {table['total_size']}\n"
-                return result
-
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT tablename,
+                   pg_size_pretty(pg_total_relation_size(tablename::regclass))
+            FROM pg_tables
+            WHERE schemaname = 'public'
+            ORDER BY pg_total_relation_size(tablename::regclass) DESC
+        """)
+        tables = cursor.fetchall()
+        result = "Tables in database:\n"
+        for table in tables:
+            result += f"  {table[0]} → size: {table[1]}\n"
+        return result
     except Exception as e:
         return f"Error: {str(e)}"
-
-
+    finally:
+        conn.close()
+ 
 @tool
 def check_index_issues(table_name: str) -> str:
     """Check for index issues including redundant, missing and low cardinality indexes"""
+    conn = get_connection()
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT indexname, indexdef
-                    FROM pg_indexes
-                    WHERE tablename = %s
-                    ORDER BY indexdef
-                """, (table_name,))
-                indexes = cur.fetchall()
-
-                cur.execute("""
-                    SELECT n_live_tup, n_dead_tup
-                    FROM pg_stat_user_tables
-                    WHERE relname = %s
-                """, (table_name,))
-                stats = cur.fetchone()
-
-                issues = f"Index Issues for {table_name}:\n"
-                found = False
-
-                seen = {}
-                for idx in indexes:
-                    defn = idx["indexdef"]
-                    if defn in seen:
-                        issues += f"  REDUNDANT: {idx['indexname']} duplicates {seen[defn]}\n"
-                        issues += f"    Fix: DROP INDEX {idx['indexname']};\n"
-                        found = True
-                    else:
-                        seen[defn] = idx["indexname"]
-
-                if stats:
-                    live = stats["n_live_tup"] or 0
-                    dead = stats["n_dead_tup"] or 0
-                    if dead > 0 and live > 0 and dead > live * 0.1:
-                        issues += f"  BLOAT: {dead} dead tuples vs {live} live\n"
-                        issues += f"    Fix: VACUUM ANALYZE {table_name};\n"
-                        found = True
-
-                if not found:
-                    issues += "  No index issues found.\n"
-
-                return issues
-
+        cursor = conn.cursor()
+ 
+        # Get indexes
+        cursor.execute("""
+            SELECT indexname, indexdef
+            FROM pg_indexes
+            WHERE tablename = %s
+            ORDER BY indexdef
+        """, (table_name,))
+        indexes = cursor.fetchall()
+ 
+        # Get table stats
+        cursor.execute("""
+            SELECT n_live_tup, n_dead_tup
+            FROM pg_stat_user_tables
+            WHERE relname = %s
+        """, (table_name,))
+        stats = cursor.fetchone()
+ 
+        issues = f"Index Issues for {table_name}:\n"
+ 
+        # Find redundant indexes
+        seen = {}
+        for idx in indexes:
+            if idx[1] in seen:
+                issues += f"  REDUNDANT INDEX: {idx[0]} duplicates {seen[idx[1]]}\n"
+                issues += f"     Fix: DROP INDEX {idx[0]};\n"
+            else:
+                seen[idx[1]] = idx[0]
+ 
+        # Check table bloat
+        if stats:
+            live, dead = stats
+            if dead and live and dead > live * 0.1:
+                issues += f"  TABLE BLOAT: {dead} dead tuples vs {live} live!\n"
+                issues += f"     Fix: VACUUM ANALYZE {table_name};\n"
+ 
+        return issues
     except Exception as e:
         return f"Error: {str(e)}"
-
-
+    finally:
+        conn.close()
+ 
 @tool
 def check_data_type_issues(table_name: str) -> str:
     """Check for wrong data types in a table"""
+    conn = get_connection()
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT column_name, data_type, character_maximum_length
-                    FROM information_schema.columns
-                    WHERE table_name = %s
-                    ORDER BY ordinal_position
-                """, (table_name,))
-                columns = cur.fetchall()
-
-                issues = f"Data Type Issues for {table_name}:\n"
-                found = False
-
-                for col in columns:
-                    name = col["column_name"]
-                    dtype = col["data_type"]
-                    max_len = col["character_maximum_length"]
-
-                    if any(x in name.lower() for x in ["price", "amount", "cost"]):
-                        if dtype == "text":
-                            issues += f"  {name} is TEXT -> should be DECIMAL\n"
-                            found = True
-
-                    if any(x in name.lower() for x in ["stock", "quantity"]):
-                        if dtype == "text":
-                            issues += f"  {name} is TEXT -> should be INT\n"
-                            found = True
-
-                    if "phone" in name.lower() and dtype == "integer":
-                        issues += f"  {name} is INT -> should be VARCHAR\n"
-                        found = True
-
-                    if dtype == "character varying" and max_len and max_len > 500:
-                        issues += f"  {name} is VARCHAR({max_len}) -> too wide\n"
-                        found = True
-
-                if not found:
-                    issues += "  No data type issues found.\n"
-
-                return issues
-
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT column_name, data_type, character_maximum_length
+            FROM information_schema.columns
+            WHERE table_name = %s
+            ORDER BY ordinal_position
+        """, (table_name,))
+        columns = cursor.fetchall()
+ 
+        issues = f"Data Type Issues for {table_name}:\n"
+        found = False
+ 
+        for col in columns:
+            name, dtype, max_len = col
+ 
+            # Price/amount as TEXT
+            if any(x in name.lower() for x in ['price', 'amount', 'cost']):
+                if dtype == 'text':
+                    issues += f"  {name} is TEXT → should be DECIMAL!\n"
+                    found = True
+ 
+            # Stock/quantity as TEXT
+            if any(x in name.lower() for x in ['stock', 'quantity']):
+                if dtype == 'text':
+                    issues += f"   {name} is TEXT → should be INT!\n"
+                    found = True
+ 
+            # Phone as INT
+            if 'phone' in name.lower() and dtype == 'integer':
+                issues += f"   {name} is INT → should be VARCHAR!\n"
+                found = True
+ 
+            # Over-wide VARCHAR
+            if dtype == 'character varying' and max_len and max_len > 500:
+                issues += f"   {name} is VARCHAR({max_len}) → too wide!\n"
+                found = True
+ 
+        if not found:
+            issues += "   No data type issues found!\n"
+ 
+        return issues
     except Exception as e:
         return f"Error: {str(e)}"
+    finally:
+        conn.close()
+@tool
+def get_slow_queries(limit: int = 10) -> str:
+    """Get top slowest queries from pg_stat_statements extension"""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+
+        # Check if pg_stat_statements is enabled
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM pg_extension
+                WHERE extname = 'pg_stat_statements'
+            );
+        """)
+        enabled = cursor.fetchone()[0]
+
+        if not enabled:
+            return """pg_stat_statements not enabled!
+To enable:
+1. Add to postgresql.conf:
+   shared_preload_libraries = 'pg_stat_statements'
+2. Restart Postgres
+3. Run: CREATE EXTENSION pg_stat_statements;"""
+
+        cursor.execute("""
+            SELECT query, calls, mean_exec_time,
+                   total_exec_time, rows
+            FROM pg_stat_statements
+            ORDER BY mean_exec_time DESC
+            LIMIT %s
+        """, (limit,))
+        queries = cursor.fetchall()
+
+        if not queries:
+            return "No queries in pg_stat_statements yet!"
+
+        result = f"Top {limit} Slowest Queries:\n\n"
+        for i, q in enumerate(queries, 1):
+            result += f"{i}. Query: {q[0][:100]}\n"
+            result += f"   Calls: {q[1]}\n"
+            result += f"   Avg time: {q[2]:.2f}ms\n"
+            result += f"   Total time: {q[3]:.2f}ms\n\n"
+
+        return result
+    except Exception as e:
+        return f"Error: {str(e)}"
+    finally:
+        conn.close()
