@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+
 	"github.com/y-infoblox/sql-optimizer-agent/gorm-parser/parser"
 )
 
@@ -24,6 +25,7 @@ func main() {
 	filename := args[0]
 
 	walker := parser.NewWalker()
+
 	err := walker.ParseFile(filename)
 	if err != nil {
 		fmt.Printf("Error parsing file: %v\n", err)
