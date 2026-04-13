@@ -13,18 +13,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	args := os.Args[1:]
-	if len(args) > 0 && args[0] == "--" {
-		args = args[1:]
-	}
-	if len(args) < 1 {
-		fmt.Println("Usage: gorm-parser <path-to-go-file>")
-		os.Exit(1)
-	}
+	filename := os.Args[1]
 
-	filename := args[0]
-
-	walker := parser.NewWalker()
+	walker := parser.NewWalkerV2()
 
 	err := walker.ParseFile(filename)
 	if err != nil {
@@ -32,11 +23,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	jsonOutput, err := parser.EmitJSON(walker.Chains)
+	json, err := parser.EmitFullJSON(walker.Chains, walker.Warnings)
 	if err != nil {
 		fmt.Printf("Error generating JSON: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Println(jsonOutput)
+	fmt.Println(json)
 }
